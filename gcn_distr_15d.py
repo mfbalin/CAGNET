@@ -628,10 +628,13 @@ def run(rank, size, inputs, adj_matrix, data, features, classes, device):
 
         # for epoch in range(1, 201):
         print(f"Starting training... rank {rank} run {i}", flush=True)
+        tt = time.time()
         for epoch in range(1, epochs):
             outputs = train(inputs_loc, weight1, weight2, adj_matrix_loc, am_pbyp, optimizer, data, 
                                     rank, size, group, row_groups, col_groups)
-            print("Epoch: {:03d}".format(epoch), flush=True)
+            ttt = time.time()
+            print("Epoch: {:03d} {}".format(epoch, ttt - tt), flush=True)
+            tt = ttt
 
         # dist.barrier(group)
         torch.cuda.synchronize(device=device)

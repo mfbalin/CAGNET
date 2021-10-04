@@ -1,6 +1,7 @@
 import os
 import os.path as osp
 import argparse
+import struct
 
 import math
 
@@ -11,7 +12,7 @@ from torch_geometric.data import Data, Dataset
 from torch_geometric.datasets import Planetoid, PPI
 from reddit import Reddit
 from torch_geometric.nn import GCNConv, ChebConv  # noqa
-from torch_geometric.utils import add_remaining_self_loops, to_dense_adj, dense_to_sparse, to_scipy_sparse_matrix
+from torch_geometric.utils import from_scipy_sparse_matrix, add_remaining_self_loops, to_dense_adj, dense_to_sparse, to_scipy_sparse_matrix
 import torch_geometric.transforms as T
 
 import torch.multiprocessing as mp
@@ -30,6 +31,8 @@ import socket
 import statistics
 import time
 import numpy as np
+
+from scipy.sparse import csr_matrix, coo_matrix
 
 # comp_time = 0.0
 # comm_time = 0.0
@@ -593,10 +596,12 @@ def run(rank, size, inputs, adj_matrix, data, features, classes, device):
 
         # for epoch in range(1, 201):
         print(f"Starting training... rank {rank} run {i}", flush=True)
+        tt = tstart
         for epoch in range(1, epochs):
             outputs = train(inputs_loc, weight1, weight2, adj_matrix_loc, am_pbyp, optimizer, data, 
                                     rank, size, group)
-            print("Epoch: {:03d}".format(epoch), flush=True)
+            print("Epoch: {:03d} {}".format(epoch, time.time() - tt), flush=True)
+            tt = time.time() 
 
         # dist.barrier(group)
         tstop = time.time()
@@ -775,6 +780,54 @@ def main():
         data = data.to(device)
         inputs.requires_grad = True
         data.y = data.y.to(device)
+    elif graphname == 'ogb':
+        from ogb.nodeproppred import PygNodePropPredDataset
+        dataset = PygNodePropPredDataset(name = graphname, root = 'dataset/')
+        edge_index = dataset[0].edge_index
+        n, num_features = dataset[0].x.shape
+        num_classes = dataset[0].y.max() + 1
+        inputs = dataset[0].x
+        data = Data()
+        data.x = inputs
+        data.y = dataset[0].y.reshape(n)
+        split_idx = dataset.get_idx_split()
+        data.train_mask = torch.zeros(n, dtype=torch.bool).index_fill_(0, split_idx['train'], True)
+        data.val_mask = torch.zeros(n, dtype=torch.bool).index_fill_(0, split_idx['valid'], True)
+        data.test_mask = torch.zeros(n, dtype=torch.bool).index_fill_(0, split_idx['test'], True)
+        data = data.to(device)
+        data.x.requires_grad = True
+    else:
+        name = graphname
+        with open(os.path.join(name, 'graph.bin'), 'rb') as f:
+            s = f.read(11)
+            assert(s == b'PIGO-CSR-v2')
+            s = f.read(2)
+            assert(s[0] == 4 and s[1] == 4)
+            (_, nnz, N, M) = struct.unpack('IIII', f.read(16))
+            indptr = np.frombuffer(f.read((N + 1) * 4), dtype='uint32')
+            indices = np.frombuffer(f.read(nnz * 4), dtype='uint32')
+            data = np.frombuffer(f.read(nnz * 4), dtype='float32')
+        n = N
+        g = csr_matrix((data, indices, indptr), shape=(N, M))
+        edge_index = from_scipy_sparse_matrix(g)[0]
+        print(g.shape, edge_index.shape)
+        with open(os.path.join(name, 'features.bin'), 'rb') as f:
+            (N, M) = struct.unpack('II', f.read(8))
+            inputs = np.frombuffer(f.read(N * M * 4), dtype='float32').reshape(N, M)
+        num_features = M
+        inputs = torch.tensor(inputs)
+        inputs.requires_grad = True
+        data = Data()
+        with open(os.path.join(name, 'labels.bin'), 'rb') as f:
+            (N, M) = struct.unpack('II', f.read(8))
+            data.y = np.frombuffer(f.read(N * M * 4), dtype='int32')
+        data.y = torch.tensor(data.y, dtype=torch.long)
+        num_classes = data.y.max() + 1
+        with open(os.path.join(name, 'sets.bin'), 'rb') as f:
+            (N, M) = struct.unpack('II', f.read(8))
+            data.train_mask = np.frombuffer(f.read(N * M * 4), dtype='int32')
+        data.train_mask = torch.tensor(data.train_mask == 0, dtype=torch.bool)
+        data = data.to(device)
 
     if download:
         exit()
