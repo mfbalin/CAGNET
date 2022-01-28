@@ -340,9 +340,13 @@ class GCNFunc(torch.autograd.Function):
 
         return grad_input, grad_weight, None, None, None, None, None, None
 
-def train(inputs, weight1, weight2, adj_matrix, am_partitions, optimizer, data, rank, size, group):
-    outputs = GCNFunc.apply(inputs, weight1, adj_matrix, am_partitions, rank, size, group, F.relu)
-    outputs = GCNFunc.apply(outputs, weight2, adj_matrix, am_partitions, rank, size, group, F.log_softmax)
+def train(inputs, weights,  adj_matrix, am_partitions, optimizer, data, rank, size, group):
+    outputs = inputs
+    for i, w in enumerate(weights):
+        outputs = GCNFunc.apply(outputs, w, adj_matrix, am_partitions, rank, size, group, F.relu if i < len(weights) - 1 else F.log_softmax)
+    #for i in range(15):
+     #   outputs = GCNFunc.apply(outputs, weight1, adj_matrix, am_partitions, rank, size, group, F.relu)
+   # outputs = GCNFunc.apply(outputs, weight2, adj_matrix, am_partitions, rank, size, group, F.log_softmax)
 
     optimizer.zero_grad()
     rank_train_mask = torch.split(data.train_mask.bool(), outputs.size(0), dim=0)[rank]
@@ -522,6 +526,9 @@ def run(rank, size, inputs, adj_matrix, data, features, classes, device):
     global mid_layer
     global run
     global timing
+    global num_layers
+
+    layer_sizes = [features] + [mid_layer for i in range(num_layers - 1)] + [classes]
 
     best_val_acc = test_acc = 0
     outputs = None
@@ -545,18 +552,17 @@ def run(rank, size, inputs, adj_matrix, data, features, classes, device):
     for i in range(run_count):
         run = i
         torch.manual_seed(0)
-        weight1_nonleaf = torch.rand(features, mid_layer, requires_grad=True)
-        weight1_nonleaf = weight1_nonleaf.to(device)
-        weight1_nonleaf.retain_grad()
+        weights = []
+        for j in range(len(layer_sizes) - 1):
+            weight1_nonleaf = torch.rand(layer_sizes[j], layer_sizes[j+1], requires_grad=True)
+            weight1_nonleaf = weight1_nonleaf.to(device)
+            weight1_nonleaf.retain_grad()
+            weights.append(Parameter(weight1_nonleaf))
 
-        weight2_nonleaf = torch.rand(mid_layer, classes, requires_grad=True)
-        weight2_nonleaf = weight2_nonleaf.to(device)
-        weight2_nonleaf.retain_grad()
+        #weight1 = Parameter(weight1_nonleaf)
+        #weight2 = Parameter(weight2_nonleaf)
 
-        weight1 = Parameter(weight1_nonleaf)
-        weight2 = Parameter(weight2_nonleaf)
-
-        optimizer = torch.optim.Adam([weight1, weight2], lr=0.01)
+        optimizer = torch.optim.Adam(weights, lr=0.01)
         dist.barrier(group)
 
         tstart = 0.0
@@ -586,8 +592,7 @@ def run(rank, size, inputs, adj_matrix, data, features, classes, device):
 
         timing_on = timing == True
         timing = False
-        outputs = train(inputs_loc, weight1, weight2, adj_matrix_loc, am_pbyp, optimizer, data, 
-                                rank, size, group)
+        outputs = train(inputs_loc, weights, adj_matrix_loc, am_pbyp, optimizer, data, rank, size, group)
         if timing_on:
             timing = True
 
@@ -598,7 +603,7 @@ def run(rank, size, inputs, adj_matrix, data, features, classes, device):
         print(f"Starting training... rank {rank} run {i}", flush=True)
         tt = tstart
         for epoch in range(1, epochs):
-            outputs = train(inputs_loc, weight1, weight2, adj_matrix_loc, am_pbyp, optimizer, data, 
+            outputs = train(inputs_loc, weights, adj_matrix_loc, am_pbyp, optimizer, data, 
                                     rank, size, group)
             print("Epoch: {:03d} {}".format(epoch, time.time() - tt), flush=True)
             tt = time.time() 
@@ -857,7 +862,7 @@ if __name__ == '__main__':
     parser.add_argument("--activations", type=str)
     parser.add_argument("--accuracy", type=str)
     parser.add_argument("--download", type=bool)
-
+    parser.add_argument("--layers", type=int, default=1)
     args = parser.parse_args()
     print(args)
 
@@ -868,6 +873,7 @@ if __name__ == '__main__':
     timing = args.timing == "True"
     mid_layer = args.midlayer
     run_count = args.runcount
+    num_layers = args.layers
     normalization = args.normalization == "True"
     activations = args.activations == "True"
     accuracy = args.accuracy == "True"
